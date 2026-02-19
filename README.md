@@ -28,7 +28,7 @@ Use this visualization only for education, security awareness, and authorized de
 Do not use it for unauthorized testing, exploitation, or illegal activity.
 
 ## Security Notes
-- Server binds to `127.0.0.1` only (local machine).
+- Server defaults to local binding and can be configured via `HOST`/`PORT`.
 - API accepts JSON only and enforces request size limits.
 - WebSocket stream is restricted to local app origins.
 - Frontend escapes rendered simulation output before inserting into HTML.
@@ -50,3 +50,53 @@ python app.py
 Then open:
 
 `http://127.0.0.1:8000`
+
+## Deploy on Render
+This project is compatible with Render Web Services.
+
+- A `render.yaml` blueprint is included.
+- The app reads `PORT` from environment and can bind `0.0.0.0`.
+- `ENABLE_WS` is set to `0` in Render blueprint because this project uses a separate local WebSocket port by default.
+
+### Quick steps
+1. Push this repository to GitHub.
+2. In Render, create a new Web Service from the repo.
+3. Render will detect `render.yaml` and apply build/start settings.
+4. Deploy and open your Render URL.
+
+### Optional advanced setup
+- If you want real-time WebSocket feed in production, run a dedicated WebSocket service and expose it through your proxy/domain.
+- Keep origin restrictions and request limits enabled.
+
+## Production Deployment Notes
+- Recommended scope: internal lab/training environments only.
+- Do not expose this app directly to the public internet without additional controls.
+
+### 1. Runtime
+- Use a dedicated Linux user and isolated VM/container.
+- Run with a virtual environment and pinned dependencies.
+- Use a process manager (`systemd`, `supervisord`, or container restart policy).
+
+### 2. Network
+- Keep direct app binding private (localhost or private network).
+- Place a reverse proxy (Nginx/Caddy) in front for:
+  - TLS termination (HTTPS/WSS)
+  - Request rate limiting
+  - Request body size limits
+  - Access logging
+- Restrict inbound access by firewall/IP allowlist.
+
+### 3. Security Hardening
+- Keep OS and Python dependencies patched regularly.
+- Rotate logs and monitor for unusual request bursts.
+- Disable or limit unused ports/services on the host.
+- If exposing beyond localhost, enforce authentication at proxy level.
+
+### 4. WebSocket
+- Proxy WebSocket traffic explicitly (`/ws` route or dedicated upstream).
+- Restrict allowed origins to trusted frontend domains only.
+- Cap concurrent client connections.
+
+### 5. Data Handling
+- This app is simulation-focused and should not receive sensitive production data.
+- Treat uploaded samples as untrusted input; scan and isolate host environment accordingly.

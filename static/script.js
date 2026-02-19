@@ -108,6 +108,10 @@ let currentMode = "attack";
 let ws = null;
 let wsPingTimer = null;
 let wsReconnectTimer = null;
+let runtimeConfig = {
+  ws_enabled: true,
+  ws_port: 8765,
+};
 let bruteTimer = null;
 let sqliAnimFrame = null;
 let malwareAnimFrame = null;
@@ -291,7 +295,30 @@ function triggerAccessGranted() {
 }
 
 function wsUrl() {
-  return `ws://${window.location.hostname || "127.0.0.1"}:8765/`;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const host = window.location.hostname || "127.0.0.1";
+  const port = runtimeConfig.ws_port || 8765;
+  return `${protocol}://${host}:${port}/`;
+}
+
+async function loadRuntimeConfig() {
+  try {
+    const response = await fetch("/api/config", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    runtimeConfig = {
+      ws_enabled: Boolean(data.ws_enabled),
+      ws_port: Number(data.ws_port) || 8765,
+    };
+  } catch {
+    // Keep built-in defaults if config endpoint is unavailable.
+    runtimeConfig = {
+      ws_enabled: true,
+      ws_port: 8765,
+    };
+  }
 }
 
 function clearWsTimers() {
@@ -306,6 +333,14 @@ function clearWsTimers() {
 }
 
 function connectWebSocket() {
+  if (!runtimeConfig.ws_enabled) {
+    updateWsState(false);
+    wsStatus.textContent = "WS DISABLED";
+    terminalMode.textContent = "local-only";
+    enqueueTerminal("Live websocket stream disabled by server config", "warn");
+    return;
+  }
+
   clearWsTimers();
   updateWsState(false);
 
@@ -378,6 +413,9 @@ function connectWebSocket() {
 }
 
 function scheduleReconnect() {
+  if (!runtimeConfig.ws_enabled) {
+    return;
+  }
   clearWsTimers();
   wsReconnectTimer = setTimeout(connectWebSocket, 1800);
 }
@@ -1194,13 +1232,18 @@ window.addEventListener("resize", () => {
   drawPromptChart(promptSeries, 100);
 });
 
-setMode("attack");
-initCodeRain();
-resetBruteChart();
-resetSqliChart();
-resetMalwareChart();
-resetPromptChart();
-setMitigations(defaultMitigations);
-updateWsState(false);
-enqueueTerminal("Boot sequence initialized", "info");
-connectWebSocket();
+async function bootstrap() {
+  setMode("attack");
+  initCodeRain();
+  resetBruteChart();
+  resetSqliChart();
+  resetMalwareChart();
+  resetPromptChart();
+  setMitigations(defaultMitigations);
+  updateWsState(false);
+  enqueueTerminal("Boot sequence initialized", "info");
+  await loadRuntimeConfig();
+  connectWebSocket();
+}
+
+bootstrap();

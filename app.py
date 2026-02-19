@@ -11,6 +11,7 @@ import asyncio
 import json
 import math
 import mimetypes
+import os
 import random
 import re
 import threading
@@ -30,9 +31,12 @@ except ImportError:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-HOST = "127.0.0.1"
-PORT = 8000
-WS_PORT = 8765
+PORT = int(os.getenv("PORT", "8000"))
+HOST = os.getenv("HOST", "0.0.0.0" if os.getenv("PORT") else "127.0.0.1")
+WS_PORT = int(os.getenv("WS_PORT", "8765"))
+ENABLE_WS = os.getenv("ENABLE_WS", "1").lower() in {"1", "true", "yes", "on"}
+if os.getenv("RENDER") and "ENABLE_WS" not in os.environ:
+    ENABLE_WS = False
 MAX_POST_BYTES = 1_000_000
 MAX_WS_CLIENTS = 24
 WS_ALLOWED_ORIGINS = [f"http://{HOST}:{PORT}", f"http://localhost:{PORT}"]
@@ -153,7 +157,7 @@ async def ws_handler(websocket: Any, _path: str | None = None) -> None:
 
 
 async def ws_server_main() -> None:
-    if websockets is None:
+    if websockets is None or not ENABLE_WS:
         return
 
     server = await websockets.serve(
@@ -171,6 +175,10 @@ async def ws_server_main() -> None:
 
 
 def start_websocket_server() -> None:
+    if not ENABLE_WS:
+        print("WebSocket stream disabled by configuration (ENABLE_WS=0).")
+        return
+
     if websockets is None:
         print("WebSocket package missing. Install 'websockets' for live terminal effects.")
         return
@@ -664,6 +672,15 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/api/config":
+            self._send_json(
+                {
+                    "ws_enabled": ENABLE_WS,
+                    "ws_port": WS_PORT,
+                }
+            )
+            return
+
         if path in ("/", "/index.html"):
             self._send_file(STATIC_DIR / "index.html")
             return
