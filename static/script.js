@@ -110,7 +110,7 @@ let wsPingTimer = null;
 let wsReconnectTimer = null;
 let runtimeConfig = {
   ws_enabled: true,
-  ws_port: 8765,
+  ws_path: "/ws",
 };
 let bruteTimer = null;
 let sqliAnimFrame = null;
@@ -296,9 +296,9 @@ function triggerAccessGranted() {
 
 function wsUrl() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const host = window.location.hostname || "127.0.0.1";
-  const port = runtimeConfig.ws_port || 8765;
-  return `${protocol}://${host}:${port}/`;
+  const host = window.location.host || "127.0.0.1:8000";
+  const path = runtimeConfig.ws_path || "/ws";
+  return `${protocol}://${host}${path}`;
 }
 
 async function loadRuntimeConfig() {
@@ -310,13 +310,13 @@ async function loadRuntimeConfig() {
     const data = await response.json();
     runtimeConfig = {
       ws_enabled: Boolean(data.ws_enabled),
-      ws_port: Number(data.ws_port) || 8765,
+      ws_path: String(data.ws_path || "/ws"),
     };
   } catch {
     // Keep built-in defaults if config endpoint is unavailable.
     runtimeConfig = {
       ws_enabled: true,
-      ws_port: 8765,
+      ws_path: "/ws",
     };
   }
 }

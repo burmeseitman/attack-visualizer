@@ -8,40 +8,37 @@ It does not execute real attacks against systems or databases.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
-import mimetypes
 import os
 import random
 import re
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-try:
-    import websockets
-except ImportError:  # pragma: no cover
-    websockets = None
+from aiohttp import WSMsgType, web
+from aiohttp.web_exceptions import HTTPRequestEntityTooLarge
 
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0" if os.getenv("PORT") else "127.0.0.1")
-WS_PORT = int(os.getenv("WS_PORT", "8765"))
+WS_PATH = "/ws"
 ENABLE_WS = os.getenv("ENABLE_WS", "1").lower() in {"1", "true", "yes", "on"}
-if os.getenv("RENDER") and "ENABLE_WS" not in os.environ:
-    ENABLE_WS = False
 MAX_POST_BYTES = 1_000_000
 MAX_WS_CLIENTS = 24
-WS_ALLOWED_ORIGINS = [f"http://{HOST}:{PORT}", f"http://localhost:{PORT}"]
+LOCAL_ORIGIN_ALLOWLIST = {
+    f"http://127.0.0.1:{PORT}",
+    f"http://localhost:{PORT}",
+    f"https://127.0.0.1:{PORT}",
+    f"https://localhost:{PORT}",
+}
 
-WS_LOOP: asyncio.AbstractEventLoop | None = None
 WS_CLIENTS: set[Any] = set()
 
 
@@ -82,8 +79,11 @@ async def ws_broadcast(event: dict[str, Any]) -> None:
     raw = json.dumps(event)
     dead_clients: list[Any] = []
     for client in list(WS_CLIENTS):
+        if client.closed:
+            dead_clients.append(client)
+            continue
         try:
-            await client.send(raw)
+            await client.send_str(raw)
         except Exception:
             dead_clients.append(client)
 
@@ -91,15 +91,9 @@ async def ws_broadcast(event: dict[str, Any]) -> None:
         WS_CLIENTS.discard(client)
 
 
-def publish_live_event(event_type: str, message: str, payload: dict[str, Any] | None = None) -> None:
-    if WS_LOOP is None:
-        return
-
+async def publish_live_event(event_type: str, message: str, payload: dict[str, Any] | None = None) -> None:
     event = build_live_event(event_type, message, payload)
-    try:
-        asyncio.run_coroutine_threadsafe(ws_broadcast(event), WS_LOOP)
-    except RuntimeError:
-        return
+    await ws_broadcast(event)
 
 
 async def telemetry_loop() -> None:
@@ -116,20 +110,43 @@ async def telemetry_loop() -> None:
     while True:
         await asyncio.sleep(1.6)
         if WS_CLIENTS:
-            publish_live_event(
+            await publish_live_event(
                 "telemetry",
                 random.choice(feed),
                 {"clients": len(WS_CLIENTS), "entropy": random.randint(11, 99)},
             )
 
 
-async def ws_handler(websocket: Any, _path: str | None = None) -> None:
-    if len(WS_CLIENTS) >= MAX_WS_CLIENTS:
-        await websocket.close(code=1013, reason="Server busy")
-        return
+def _origin_allowed(request: web.Request) -> bool:
+    origin = request.headers.get("Origin")
+    if not origin:
+        return True
 
-    WS_CLIENTS.add(websocket)
-    await websocket.send(
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+
+    if parsed.netloc == request.host:
+        return True
+
+    return origin in LOCAL_ORIGIN_ALLOWLIST
+
+
+async def websocket_endpoint(request: web.Request) -> web.StreamResponse:
+    if not ENABLE_WS:
+        return web.json_response({"error": "WebSocket disabled by configuration."}, status=503)
+
+    if not _origin_allowed(request):
+        return web.json_response({"error": "Forbidden origin."}, status=403)
+
+    if len(WS_CLIENTS) >= MAX_WS_CLIENTS:
+        return web.json_response({"error": "WebSocket capacity reached."}, status=503)
+
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1_000_000)
+    await ws.prepare(request)
+    WS_CLIENTS.add(ws)
+
+    await ws.send_str(
         json.dumps(
             build_live_event(
                 "status",
@@ -140,59 +157,23 @@ async def ws_handler(websocket: Any, _path: str | None = None) -> None:
     )
 
     try:
-        async for message in websocket:
-            try:
-                payload = json.loads(message)
-            except json.JSONDecodeError:
-                continue
+        async for message in ws:
+            if message.type == WSMsgType.TEXT:
+                try:
+                    payload = json.loads(message.data)
+                except json.JSONDecodeError:
+                    continue
 
-            if payload.get("type") == "ping":
-                await websocket.send(
-                    json.dumps(build_live_event("pong", "pong", {"client": "browser"}))
-                )
-    except Exception:
-        pass
+                if payload.get("type") == "ping":
+                    await ws.send_str(
+                        json.dumps(build_live_event("pong", "pong", {"client": "browser"}))
+                    )
+            elif message.type in {WSMsgType.CLOSE, WSMsgType.ERROR}:
+                break
     finally:
-        WS_CLIENTS.discard(websocket)
+        WS_CLIENTS.discard(ws)
 
-
-async def ws_server_main() -> None:
-    if websockets is None or not ENABLE_WS:
-        return
-
-    server = await websockets.serve(
-        ws_handler,
-        HOST,
-        WS_PORT,
-        origins=WS_ALLOWED_ORIGINS,
-        ping_interval=20,
-        ping_timeout=20,
-        max_size=1_000_000,
-    )
-    print(f"Live WebSocket stream on ws://{HOST}:{WS_PORT}/")
-    asyncio.create_task(telemetry_loop())
-    await server.wait_closed()
-
-
-def start_websocket_server() -> None:
-    if not ENABLE_WS:
-        print("WebSocket stream disabled by configuration (ENABLE_WS=0).")
-        return
-
-    if websockets is None:
-        print("WebSocket package missing. Install 'websockets' for live terminal effects.")
-        return
-
-    def runner() -> None:
-        global WS_LOOP
-        loop = asyncio.new_event_loop()
-        WS_LOOP = loop
-        asyncio.set_event_loop(loop)
-        loop.create_task(ws_server_main())
-        loop.run_forever()
-
-    ws_thread = threading.Thread(target=runner, name="ws-server", daemon=True)
-    ws_thread.start()
+    return ws
 
 
 def sanitize_target(raw_target: str, charset: str, max_len: int = 6) -> str:
@@ -623,250 +604,263 @@ def simulate_prompt_injection(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class AppHandler(BaseHTTPRequestHandler):
-    server_version = "LiveHackerVisualizer/1.0"
+def build_security_headers() -> dict[str, str]:
+    return {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Content-Security-Policy": (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "img-src 'self' data:; "
+            "connect-src 'self' ws: wss:; "
+            "object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        ),
+    }
 
-    def _apply_security_headers(self) -> None:
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header(
-            "Content-Security-Policy",
-            (
-                "default-src 'self'; "
-                "script-src 'self'; "
-                "style-src 'self'; "
-                "img-src 'self' data:; "
-                f"connect-src 'self' ws://{HOST}:{WS_PORT} ws://localhost:{WS_PORT}; "
-                "object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-            ),
+
+@web.middleware
+async def security_headers_middleware(
+    request: web.Request,
+    handler: Any,
+) -> web.StreamResponse:
+    response = await handler(request)
+    for key, value in build_security_headers().items():
+        response.headers.setdefault(key, value)
+    response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+async def parse_json_api_payload(request: web.Request) -> tuple[dict[str, Any] | None, web.Response | None]:
+    content_type = request.headers.get("Content-Type", "").lower()
+    if "application/json" not in content_type:
+        return None, web.json_response(
+            {"error": "Unsupported Content-Type. Use application/json."},
+            status=415,
         )
 
-    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self._apply_security_headers()
-        self.end_headers()
-        self.wfile.write(body)
+    if request.content_length is not None and request.content_length > MAX_POST_BYTES:
+        return None, web.json_response(
+            {"error": f"Payload too large. Max {MAX_POST_BYTES} bytes."},
+            status=413,
+        )
 
-    def _send_file(self, file_path: Path) -> None:
-        if not file_path.exists() or not file_path.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
+    try:
+        payload = await request.json()
+    except HTTPRequestEntityTooLarge:
+        return None, web.json_response(
+            {"error": f"Payload too large. Max {MAX_POST_BYTES} bytes."},
+            status=413,
+        )
+    except json.JSONDecodeError:
+        return None, web.json_response({"error": "Invalid JSON payload."}, status=400)
 
-        ctype, _ = mimetypes.guess_type(file_path.name)
-        data = file_path.read_bytes()
+    if not isinstance(payload, dict):
+        return None, web.json_response({"error": "JSON body must be an object."}, status=400)
 
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", ctype or "application/octet-stream")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self._apply_security_headers()
-        self.end_headers()
-        self.wfile.write(data)
+    return payload, None
 
-    def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
-        if path == "/api/config":
-            self._send_json(
-                {
-                    "ws_enabled": ENABLE_WS,
-                    "ws_port": WS_PORT,
-                }
-            )
-            return
 
-        if path in ("/", "/index.html"):
-            self._send_file(STATIC_DIR / "index.html")
-            return
+async def index_handler(_: web.Request) -> web.StreamResponse:
+    return web.FileResponse(STATIC_DIR / "index.html")
 
-        if path.startswith("/static/"):
-            rel = path.removeprefix("/static/")
-            requested = (STATIC_DIR / rel).resolve()
-            if STATIC_DIR not in requested.parents and requested != STATIC_DIR:
-                self.send_error(HTTPStatus.FORBIDDEN)
-                return
-            self._send_file(requested)
-            return
 
-        self.send_error(HTTPStatus.NOT_FOUND)
+async def config_handler(_: web.Request) -> web.Response:
+    return web.json_response(
+        {
+            "ws_enabled": ENABLE_WS,
+            "ws_path": WS_PATH,
+        }
+    )
 
-    def do_POST(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self._send_json(
-                {"error": "Invalid Content-Length."},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
 
-        if length < 0:
-            self._send_json(
-                {"error": "Invalid request length."},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
+async def bruteforce_handler(request: web.Request) -> web.Response:
+    payload, error = await parse_json_api_payload(request)
+    if error:
+        return error
 
-        if length > MAX_POST_BYTES:
-            self._send_json(
-                {"error": f"Payload too large. Max {MAX_POST_BYTES} bytes."},
-                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-            )
-            return
+    result = simulate_bruteforce(payload)
+    mode = parse_mode(payload)
+    response = {
+        "mode": mode,
+        "target": result.target,
+        "charset": result.charset,
+        "search_space": result.search_space,
+        "attempts_used": result.attempts_used,
+        "attempt_cap": result.cap,
+        "cracked": result.cracked,
+        "estimated_seconds": result.estimated_seconds,
+        "logs": result.logs,
+        "explanation": (
+            "Attack mode: brute force tries every candidate combination until a "
+            "match is found or the configured attempt cap is reached."
+            if mode == "attack"
+            else "Defense mode: simulated rate limits and controls reduce the "
+            "effective brute-force window."
+        ),
+        "mitigations": [
+            "Increase password length and complexity.",
+            "Use rate limiting and account lockout policies.",
+            "Enable MFA to reduce password-only risk.",
+            "Store passwords with adaptive hashing (Argon2, bcrypt).",
+        ],
+    }
 
-        if path.startswith("/api/"):
-            content_type = self.headers.get("Content-Type", "").lower()
-            if "application/json" not in content_type:
-                self._send_json(
-                    {"error": "Unsupported Content-Type. Use application/json."},
-                    status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
-                )
-                return
+    await publish_live_event(
+        "simulation",
+        "Brute force cycle completed",
+        {
+            "kind": "bruteforce",
+            "mode": mode,
+            "target": result.target,
+            "cracked": result.cracked,
+            "attempts": result.attempts_used,
+        },
+    )
+    if result.cracked:
+        await publish_live_event(
+            "access_granted",
+            "ACCESS GRANTED: credentials accepted",
+            {"kind": "bruteforce", "mode": mode},
+        )
 
-        raw = self.rfile.read(length) if length > 0 else b"{}"
+    return web.json_response(response)
 
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
-            self._send_json({"error": "Invalid JSON payload."}, status=HTTPStatus.BAD_REQUEST)
-            return
 
-        if path == "/api/bruteforce":
-            result = simulate_bruteforce(payload)
-            mode = parse_mode(payload)
-            response = {
-                "mode": mode,
-                "target": result.target,
-                "charset": result.charset,
-                "search_space": result.search_space,
-                "attempts_used": result.attempts_used,
-                "attempt_cap": result.cap,
-                "cracked": result.cracked,
-                "estimated_seconds": result.estimated_seconds,
-                "logs": result.logs,
-                "explanation": (
-                    "Attack mode: brute force tries every candidate combination until a "
-                    "match is found or the configured attempt cap is reached."
-                    if mode == "attack"
-                    else "Defense mode: simulated rate limits and controls reduce the "
-                    "effective brute-force window."
-                ),
-                "mitigations": [
-                    "Increase password length and complexity.",
-                    "Use rate limiting and account lockout policies.",
-                    "Enable MFA to reduce password-only risk.",
-                    "Store passwords with adaptive hashing (Argon2, bcrypt).",
-                ],
-            }
-            self._send_json(response)
+async def sqli_handler(request: web.Request) -> web.Response:
+    payload, error = await parse_json_api_payload(request)
+    if error:
+        return error
 
-            publish_live_event(
-                "simulation",
-                "Brute force cycle completed",
-                {
-                    "kind": "bruteforce",
-                    "mode": mode,
-                    "target": result.target,
-                    "cracked": result.cracked,
-                    "attempts": result.attempts_used,
-                },
-            )
-            if result.cracked:
-                publish_live_event(
-                    "access_granted",
-                    "ACCESS GRANTED: credentials accepted",
-                    {"kind": "bruteforce", "mode": mode},
-                )
-            return
+    result = simulate_sqli(payload)
+    await publish_live_event(
+        "simulation",
+        "SQLi simulation completed",
+        {
+            "kind": "sqli",
+            "mode": result.get("mode"),
+            "classification": result.get("classification"),
+            "exposed": result.get("unsafe_outcome", {}).get("records_exposed", 0),
+        },
+    )
 
-        if path == "/api/sqli":
-            result = simulate_sqli(payload)
-            self._send_json(result)
+    if (
+        result.get("classification") == "none"
+        and result.get("safe_outcome", {}).get("records_exposed", 0) >= 1
+    ):
+        await publish_live_event(
+            "access_granted",
+            "ACCESS GRANTED: legitimate authentication path",
+            {"kind": "sqli", "mode": result.get("mode")},
+        )
 
-            publish_live_event(
-                "simulation",
-                "SQLi simulation completed",
-                {
-                    "kind": "sqli",
-                    "mode": result.get("mode"),
-                    "classification": result.get("classification"),
-                    "exposed": result.get("unsafe_outcome", {}).get("records_exposed", 0),
-                },
-            )
+    return web.json_response(result)
 
-            if (
-                result.get("classification") == "none"
-                and result.get("safe_outcome", {}).get("records_exposed", 0) >= 1
-            ):
-                publish_live_event(
-                    "access_granted",
-                    "ACCESS GRANTED: legitimate authentication path",
-                    {"kind": "sqli", "mode": result.get("mode")},
-                )
-            return
 
-        if path == "/api/malware":
-            result = simulate_malware(payload)
-            self._send_json(result)
+async def malware_handler(request: web.Request) -> web.Response:
+    payload, error = await parse_json_api_payload(request)
+    if error:
+        return error
 
-            publish_live_event(
-                "simulation",
-                "Malware upload analysis completed",
-                {
-                    "kind": "malware",
-                    "mode": result.get("mode"),
-                    "classification": result.get("classification"),
-                    "score": result.get("score"),
-                    "file": result.get("filename"),
-                },
-            )
-            if result.get("classification") == "low_risk":
-                publish_live_event(
-                    "access_granted",
-                    "ACCESS GRANTED: upload allowed by policy",
-                    {"kind": "malware", "mode": result.get("mode")},
-                )
-            return
+    result = simulate_malware(payload)
+    await publish_live_event(
+        "simulation",
+        "Malware upload analysis completed",
+        {
+            "kind": "malware",
+            "mode": result.get("mode"),
+            "classification": result.get("classification"),
+            "score": result.get("score"),
+            "file": result.get("filename"),
+        },
+    )
+    if result.get("classification") == "low_risk":
+        await publish_live_event(
+            "access_granted",
+            "ACCESS GRANTED: upload allowed by policy",
+            {"kind": "malware", "mode": result.get("mode")},
+        )
 
-        if path == "/api/prompt_injection":
-            result = simulate_prompt_injection(payload)
-            self._send_json(result)
+    return web.json_response(result)
 
-            publish_live_event(
-                "simulation",
-                "Prompt injection simulation completed",
-                {
-                    "kind": "prompt_injection",
-                    "mode": result.get("mode"),
-                    "classification": result.get("classification"),
-                    "raw_risk": result.get("raw_risk"),
-                    "residual_risk": result.get("residual_risk"),
-                },
-            )
-            if not result.get("safe_blocked") and not result.get("unsafe_compromised"):
-                publish_live_event(
-                    "access_granted",
-                    "ACCESS GRANTED: prompt accepted under guardrails",
-                    {"kind": "prompt_injection", "mode": result.get("mode")},
-                )
-            return
 
-        self._send_json({"error": "Endpoint not found."}, status=HTTPStatus.NOT_FOUND)
+async def prompt_injection_handler(request: web.Request) -> web.Response:
+    payload, error = await parse_json_api_payload(request)
+    if error:
+        return error
+
+    result = simulate_prompt_injection(payload)
+    await publish_live_event(
+        "simulation",
+        "Prompt injection simulation completed",
+        {
+            "kind": "prompt_injection",
+            "mode": result.get("mode"),
+            "classification": result.get("classification"),
+            "raw_risk": result.get("raw_risk"),
+            "residual_risk": result.get("residual_risk"),
+        },
+    )
+    if not result.get("safe_blocked") and not result.get("unsafe_compromised"):
+        await publish_live_event(
+            "access_granted",
+            "ACCESS GRANTED: prompt accepted under guardrails",
+            {"kind": "prompt_injection", "mode": result.get("mode")},
+        )
+
+    return web.json_response(result)
+
+
+async def telemetry_startup(app: web.Application) -> None:
+    if ENABLE_WS:
+        app["telemetry_task"] = asyncio.create_task(telemetry_loop())
+    else:
+        print("WebSocket stream disabled by configuration (ENABLE_WS=0).")
+
+
+async def telemetry_cleanup(app: web.Application) -> None:
+    task = app.get("telemetry_task")
+    if task:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    for client in list(WS_CLIENTS):
+        with contextlib.suppress(Exception):
+            await client.close()
+    WS_CLIENTS.clear()
+
+
+def create_app() -> web.Application:
+    app = web.Application(
+        client_max_size=MAX_POST_BYTES,
+        middlewares=[security_headers_middleware],
+    )
+
+    app.router.add_get("/", index_handler)
+    app.router.add_get("/index.html", index_handler)
+    app.router.add_get("/api/config", config_handler)
+    app.router.add_post("/api/bruteforce", bruteforce_handler)
+    app.router.add_post("/api/sqli", sqli_handler)
+    app.router.add_post("/api/malware", malware_handler)
+    app.router.add_post("/api/prompt_injection", prompt_injection_handler)
+    app.router.add_get(WS_PATH, websocket_endpoint)
+    app.router.add_static("/static", str(STATIC_DIR), show_index=False)
+
+    app.on_startup.append(telemetry_startup)
+    app.on_cleanup.append(telemetry_cleanup)
+    return app
 
 
 def run() -> None:
-    start_websocket_server()
-    with ThreadingHTTPServer((HOST, PORT), AppHandler) as httpd:
-        print(f"Live Hacker Attack Visualizer running on http://{HOST}:{PORT}")
-        print("Educational simulation only. Do not use for unauthorized activities.")
-        httpd.serve_forever()
+    print(f"Live Hacker Attack Visualizer running on http://{HOST}:{PORT}")
+    print("Educational simulation only. Do not use for unauthorized activities.")
+    if ENABLE_WS:
+        print(f"Live WebSocket stream on {WS_PATH} (same origin/port)")
+    web.run_app(create_app(), host=HOST, port=PORT)
 
 
 if __name__ == "__main__":

@@ -30,12 +30,12 @@ Do not use it for unauthorized testing, exploitation, or illegal activity.
 ## Security Notes
 - Server defaults to local binding and can be configured via `HOST`/`PORT`.
 - API accepts JSON only and enforces request size limits.
-- WebSocket stream is restricted to local app origins.
+- WebSocket endpoint is same-origin (`/ws`) with origin checks.
 - Frontend escapes rendered simulation output before inserting into HTML.
 - Malware upload simulation is static text analysis only (no execution).
 
 ## Tech Stack
-- Python 3 + `websockets` for live event streaming
+- Python 3 + `aiohttp` (HTTP + WebSocket on one port)
 - HTML/CSS/JavaScript frontend with hacker-style UI
 
 ## Run
@@ -56,7 +56,7 @@ This project is compatible with Render Web Services.
 
 - A `render.yaml` blueprint is included.
 - The app reads `PORT` from environment and can bind `0.0.0.0`.
-- `ENABLE_WS` is set to `0` in Render blueprint because this project uses a separate local WebSocket port by default.
+- WebSocket works on the same public Render service via `/ws`.
 
 ### Quick steps
 1. Push this repository to GitHub.
@@ -65,38 +65,13 @@ This project is compatible with Render Web Services.
 4. Deploy and open your Render URL.
 
 ### Optional advanced setup
-- If you want real-time WebSocket feed in production, run a dedicated WebSocket service and expose it through your proxy/domain.
+- Put Render behind your own domain and TLS policy if required by your organization.
 - Keep origin restrictions and request limits enabled.
 
 ## Production Deployment Notes
-- Recommended scope: internal lab/training environments only.
-- Do not expose this app directly to the public internet without additional controls.
+Use this simple flow for production deployment on Render:
 
-### 1. Runtime
-- Use a dedicated Linux user and isolated VM/container.
-- Run with a virtual environment and pinned dependencies.
-- Use a process manager (`systemd`, `supervisord`, or container restart policy).
-
-### 2. Network
-- Keep direct app binding private (localhost or private network).
-- Place a reverse proxy (Nginx/Caddy) in front for:
-  - TLS termination (HTTPS/WSS)
-  - Request rate limiting
-  - Request body size limits
-  - Access logging
-- Restrict inbound access by firewall/IP allowlist.
-
-### 3. Security Hardening
-- Keep OS and Python dependencies patched regularly.
-- Rotate logs and monitor for unusual request bursts.
-- Disable or limit unused ports/services on the host.
-- If exposing beyond localhost, enforce authentication at proxy level.
-
-### 4. WebSocket
-- Proxy WebSocket traffic explicitly (`/ws` route or dedicated upstream).
-- Restrict allowed origins to trusted frontend domains only.
-- Cap concurrent client connections.
-
-### 5. Data Handling
-- This app is simulation-focused and should not receive sensitive production data.
-- Treat uploaded samples as untrusted input; scan and isolate host environment accordingly.
+1. Push this repo to GitHub.
+2. Create a new **Web Service** in Render from the repo.
+3. Let Render use `render.yaml` automatically (build + start settings are included).
+4. Click **Deploy** and open your Render URL.
