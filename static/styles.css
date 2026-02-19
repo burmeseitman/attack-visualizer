@@ -114,6 +114,38 @@ body {
   }
 }
 
+@keyframes buttonSweep {
+  0% {
+    transform: translateX(-130%) skewX(-18deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.55;
+  }
+  100% {
+    transform: translateX(170%) skewX(-18deg);
+    opacity: 0;
+  }
+}
+
+@keyframes buttonGlitch {
+  0% {
+    transform: translateY(-1px) translateX(0);
+  }
+  25% {
+    transform: translateY(-1px) translateX(-1px);
+  }
+  50% {
+    transform: translateY(-1px) translateX(1px);
+  }
+  75% {
+    transform: translateY(-1px) translateX(-0.5px);
+  }
+  100% {
+    transform: translateY(-1px) translateX(0);
+  }
+}
+
 .app-shell {
   width: min(1460px, 96vw);
   margin: 24px auto 28px;
@@ -180,12 +212,50 @@ body {
   padding: 7px 13px;
   cursor: pointer;
   font-size: 0.79rem;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transition: color 120ms ease, text-shadow 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 .mode-btn.active {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   color: #001511;
   font-weight: 700;
+}
+
+.mode-btn::before,
+.action-btn::before,
+.file-picker-btn::before {
+  content: "";
+  position: absolute;
+  top: -35%;
+  left: -20%;
+  width: 35%;
+  height: 170%;
+  transform: translateX(-130%) skewX(-18deg);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(222, 255, 244, 0.9) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.mode-btn:hover::before,
+.action-btn:hover::before,
+.file-picker-btn:hover::before {
+  animation: buttonSweep 680ms ease;
+}
+
+.mode-btn:hover {
+  color: #d7fff3;
+  text-shadow: 0 0 8px rgba(71, 255, 206, 0.6);
+  box-shadow: inset 0 0 0 1px rgba(71, 255, 206, 0.3);
+  animation: buttonGlitch 280ms steps(2, end) 1;
 }
 
 .badge {
@@ -317,13 +387,22 @@ textarea {
   min-height: 40px;
   padding: 0 13px;
   cursor: pointer;
-  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease,
+    filter 120ms ease,
+    text-shadow 120ms ease;
 }
 
 .file-picker-btn:hover {
   transform: translateY(-1px);
   filter: brightness(1.08);
-  box-shadow: 0 0 12px rgba(71, 255, 206, 0.28);
+  box-shadow: 0 0 14px rgba(71, 255, 206, 0.34), 0 0 24px rgba(47, 195, 255, 0.2);
+  text-shadow: 0 0 7px rgba(180, 255, 232, 0.7);
+  animation: buttonGlitch 300ms steps(2, end) 1;
 }
 
 .file-picker-name {
@@ -358,12 +437,36 @@ textarea:focus {
   letter-spacing: 0.02em;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   cursor: pointer;
-  transition: transform 120ms ease, filter 120ms ease;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transition:
+    transform 120ms ease,
+    filter 120ms ease,
+    box-shadow 120ms ease,
+    text-shadow 120ms ease;
 }
 
 .action-btn:hover {
   transform: translateY(-1px);
   filter: brightness(1.08);
+  box-shadow: 0 0 16px rgba(71, 255, 206, 0.36), 0 0 28px rgba(47, 195, 255, 0.26);
+  text-shadow: 0 0 6px rgba(1, 22, 16, 0.7);
+  animation: buttonGlitch 320ms steps(2, end) 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-btn:hover::before,
+  .action-btn:hover::before,
+  .file-picker-btn:hover::before {
+    animation: none;
+  }
+
+  .mode-btn:hover,
+  .action-btn:hover,
+  .file-picker-btn:hover {
+    animation: none;
+  }
 }
 
 .card .action-btn + .chart-wrap {
