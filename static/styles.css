@@ -519,6 +519,10 @@ textarea:focus {
   margin-top: 12px;
 }
 
+.card .query-panels + .chart-wrap {
+  margin-top: 12px;
+}
+
 .card .action-btn + .query-panels {
   margin-top: 12px;
 }
